@@ -12,6 +12,9 @@ __pycache__/
 # Generated reports
 report.md
 
+# Analysis cache
+.complexity_cache.json
+
 # IDE / editor
 .vscode/
 .idea/

@@ -5,6 +5,9 @@
 #   python main.py --file path/to/code.py
 #   python main.py --code "for i in range(n): print(i)"
 #   python main.py --dir  path/to/folder/
+#
+# Caching: results are stored in .complexity_cache.json inside the scanned
+# directory.  Files are re-analyzed only when their content changes.
 # ─────────────────────────────────────────────────────────────────────────────
 
 import argparse
@@ -15,6 +18,7 @@ from pathlib import Path
 from openai import APIConnectionError
 
 from analyzer import analyze_code, AnalysisResult
+from cache import load_cache, save_cache, get_file_hash, get_cached_result, store_result
 
 # ── ANSI colour helpers (degrade gracefully on terminals without colour) ───────
 BOLD  = "\033[1m"
@@ -170,15 +174,19 @@ def _analyze_directory(dir_path: str) -> None:
     print(f"\n\U0001f4c2  Found {len(code_files)} code file(s) in '{dir_path}'")
     print(f"    Results will be saved to: report.md\n")
 
+    # ── Load cache for this directory ────────────────────────────────────────
+    cache = load_cache(root)
+    cache_hits = 0
+
     # Collect results for the report
     collected: list[tuple[str, AnalysisResult | None]] = []
 
     for idx, file_path in enumerate(code_files, 1):
-        rel  = file_path.relative_to(root)
+        rel   = file_path.relative_to(root)
         fname = str(rel)
-        print(f"{BOLD}{'\u2550'*60}{RESET}")
+        print(f"{BOLD}{'═'*60}{RESET}")
         print(f"{BOLD}  [{idx}/{len(code_files)}]  {rel}{RESET}")
-        print(f"{BOLD}{'\u2550'*60}{RESET}")
+        print(f"{BOLD}{'═'*60}{RESET}")
 
         code = file_path.read_text(encoding="utf-8", errors="replace")
         if not code.strip():
@@ -186,17 +194,35 @@ def _analyze_directory(dir_path: str) -> None:
             collected.append((fname, None))
             continue
 
-        print(f"  \U0001f916 Analyzing...\n")
+        # ── Cache lookup ──────────────────────────────────────────────────────
+        file_hash      = get_file_hash(file_path)
+        cached_result  = get_cached_result(cache, file_hash)
+
+        if cached_result:
+            print(f"  {DIM}⚡ Loaded from cache (file unchanged){RESET}\n")
+            _print_result(cached_result)
+            collected.append((fname, cached_result))
+            cache_hits += 1
+            continue
+
+        # ── Call the model ────────────────────────────────────────────────────
+        print(f"  🤖 Analyzing...\n")
         try:
             result = analyze_code(code)
             _print_result(result)
+            store_result(cache, file_hash, result)   # save to in-memory cache
+            save_cache(root, cache)                  # persist to disk immediately
             collected.append((fname, result))
         except APIConnectionError:
-            print("\n\u274c  Ollama is not running. Start it with: ollama serve", file=sys.stderr)
+            print("\n❌  Ollama is not running. Start it with: ollama serve", file=sys.stderr)
             sys.exit(1)
         except Exception as e:
-            print(f"  \u26a0\ufe0f  Could not analyze {rel}: {e}\n")
+            print(f"  ⚠️  Could not analyze {rel}: {e}\n")
             collected.append((fname, None))
+
+    # ── Cache summary ─────────────────────────────────────────────────────────
+    if cache_hits:
+        print(f"  {DIM}💾  {cache_hits}/{len(code_files)} file(s) served from cache{RESET}")
 
     # ── Save report ───────────────────────────────────────────────────────────
     report_path = root / "report.md"
